@@ -4,8 +4,14 @@
 #include <math.h>
 
 /* The width and height of the output image */
-#define WIDTH  1280
-#define HEIGHT  720
+#define WIDTH      1280
+#define HEIGHT      720
+
+/* Number of ray samples per pixel */
+#define PX_SAMPLES    8
+
+/* State to kickstart the prf */
+#define INIT_STATE   42
 
 /* Print a correctly formatted ppm ASCII image.
  * - `unsigned char* fb`: The frame buffer, correctly sized.
@@ -74,6 +80,40 @@ point3 ray_at(ray* r, float t) {
     return vec3_add(r->loc, vec3_scale(t, r->dir));
 }
 
+/* xorshift on a state.
+ * - `s`: The state.
+ *
+ * See: https://en.wikipedia.org/wiki/Xorshift */
+unsigned int rand_xorshift(unsigned int s) {
+    s ^= s << 13;
+    s ^= s >> 17;
+    s ^= s << 5;
+
+    return s;
+}
+
+/* Pseudorandom function. Calls xorshift and updates the state. */
+unsigned int rand_prf(unsigned int* s) {
+    *s = rand_xorshift(*s);
+
+    return *s;
+}
+
+/* Random float in [0, 1). */
+float rand_float(unsigned int* s) {
+    unsigned int x = rand_prf(s);
+
+    // We have 32 bits to work with, mantissa takes 24, so shift over 8.
+    unsigned int man = x >> (32 - 24);
+
+    return (float)man / (1 << 24);
+}
+
+/* Random square in x: [-.5, .5] and y: [-.5, .5]. */
+vec3 rand_square(unsigned int* s) {
+    return (vec3){ rand_float(s) - .5, rand_float(s) - .5, 0 };
+}
+
 /* Whether the ray intersects the sphere.
  * - `point3* cen`: Center of the sphere.
  * - `float rad`: Radius of the sphere.
@@ -109,6 +149,9 @@ color ray_color(ray* r) {
 }
 
 int main() {
+    // RNG seed
+    unsigned int state = INIT_STATE;
+
     // Our framebuffer. This is where the image is emitted to.
     unsigned char* fb = malloc(3 * WIDTH * HEIGHT);
 
@@ -134,11 +177,24 @@ int main() {
     // Fill the framebuffer pixel by pixel.
     for (int y = 0; y < HEIGHT; y++) {
         for (int x = 0; x < WIDTH; x++) {
-            point3 px_cen = vec3_add(vec3_add(px00_loc, vec3_scale(x, px_du)), vec3_scale(y, px_dv));
-            vec3 ray_dir  = vec3_sub(px_cen, cam_cen);
 
-            ray r = { cam_cen, ray_dir };
-            color c = ray_color(&r);
+            color c = { 0, 0, 0 };
+            for (int i = 0; i < PX_SAMPLES; i++) {
+                point3 offset = rand_square(&state);
+                point3 px_cen = vec3_add(
+                        vec3_add(
+                            px00_loc,
+                            vec3_scale(x + offset.x, px_du)),
+                            vec3_scale(y + offset.y, px_dv));
+
+                vec3 ray_dir = vec3_sub(px_cen, cam_cen);
+
+                ray r = { cam_cen, ray_dir };
+
+                c = vec3_add(c, ray_color(&r));
+            }
+
+            c = vec3_scale(1.0 / PX_SAMPLES, c);
             
             int i = 3 * (y * WIDTH + x);
 
