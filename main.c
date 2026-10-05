@@ -116,6 +116,118 @@ vec3 rand_square(unsigned int* s) {
 
 typedef struct { point3 v[3]; } tri;
 
+unsigned int read_uint(const unsigned char** buf) {
+    // Note endianness.
+    unsigned int i = (unsigned int) (*buf)[0]
+                   | (unsigned int) (*buf)[1] << 8
+                   | (unsigned int) (*buf)[2] << 16
+                   | (unsigned int) (*buf)[3] << 24;
+
+    *buf += 4;
+
+    return i;
+}
+
+float read_float(const unsigned char** buf) {
+    float f;
+    unsigned int bs = read_uint(buf);
+
+    memcpy(&f, &bs, sizeof f);
+
+    return f;
+}
+
+point3 read_point3(const unsigned char** buf) {
+    float x = read_float(buf);
+    float y = read_float(buf);
+    float z = read_float(buf);
+
+    return (point3) { x, y, z };
+}
+
+tri read_tri(const unsigned char** buf) {
+    point3 p1 = read_point3(buf);
+    point3 p2 = read_point3(buf);
+    point3 p3 = read_point3(buf);
+
+    return (tri) { .v = { p1, p2, p3 } };
+}
+
+/* Load a binary STL file into a triangle buffer.
+ *
+ * In a binary STL file we have:
+ * - A header of 80 bytes which we skip.
+ * - A number of facets uint32_t over 4 bytes.
+ * 
+ * Then we have a list of facets which contain: the normal vector, vertices 1,
+ * 2, and 3, and an attribute field which takes 2 bytes. All fields in little
+ * endian.
+ *
+ * We're not interested in the normal or the attribute field (which is never
+ * used anyway) which is why we advance the cursor in the loop that way.
+ *
+ * This function allocates, caller should free.
+ *
+ * See: https://en.wikipedia.org/wiki/STL_(file_format)#Binary */
+tri* stl_load(const unsigned char* buf, size_t len, size_t* ntris) {
+    // Needs at least header and count
+    if (len < 84) return NULL;
+
+    buf += 80; // Skip header
+
+    unsigned int count = read_uint(&buf);
+
+    // Each facet is 50 bytes
+    if (len != 84 + 50 * (size_t)count) return NULL;
+
+    tri* tb = malloc(count * sizeof(tri));
+    if (tb == NULL) return NULL;
+
+    for (size_t i = 0; i < count; i++) {
+        buf += 12;              // Skip normal (3 floats)
+        tb[i] = read_tri(&buf);
+        buf += 2;               // Skip attribute
+    }
+
+    *ntris = count;
+
+    return tb;
+}
+
+unsigned char* file_read(const char* path, size_t* len) {
+    FILE* f = fopen(path, "rb");
+    if (f == NULL) return NULL;
+
+    fseek(f, 0, SEEK_END);
+
+    long ssize = ftell(f);
+    if (ssize < 0) {
+        fclose(f);
+        return NULL;
+    };
+    size_t size = ssize;
+
+    fseek(f, 0, SEEK_SET);
+
+    unsigned char* buf = malloc(size);
+    if (buf == NULL) {
+        fclose(f);
+        return NULL;
+    }
+
+    size_t size_r = fread(buf, 1, size, f);
+    fclose(f);
+
+    if (size != size_r) {
+        free(buf);
+        return NULL;
+    }
+
+    *len = size;
+
+    return buf;
+}
+
 /* Compute Möller–Trumbore to find intersection.
  *
  * See: https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm */
@@ -190,7 +302,22 @@ color ray_color(ray* r) {
     return vec3_scale(0.5, (color){ norm.x + 1, norm.y + 1, norm.z + 1 });
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <file.stl>\n", argv[0]);
+        return 1;
+    }
+
+    size_t fl;
+    unsigned char* buf = file_read(argv[1], &fl);
+    if (buf == NULL) {
+        fprintf(stderr, "Failed to read file: %s\n", argv[1]);
+        return 1;
+    }
+
+    size_t ntris = 0;
+    tri*    tris = stl_load(buf, fl, &ntris);
+
     // RNG seed
     unsigned int state = INIT_STATE;
 
@@ -249,6 +376,8 @@ int main() {
     ppm_print(fb, WIDTH, HEIGHT);
 
     free(fb);
+    free(tris);
+    free(buf);
 
     return 0;
 }
