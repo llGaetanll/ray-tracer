@@ -10,6 +10,9 @@
 /* Number of ray samples per pixel */
 #define PX_SAMPLES    8
 
+/* Maximum number of bounces for a given ray */
+#define MAX_RAY_BNCE  4
+
 /* State to kickstart the prf */
 #define INIT_STATE   42
 
@@ -41,6 +44,11 @@ vec3 vec3_add(vec3 a, vec3 b) {
 
 vec3 vec3_sub(vec3 a, vec3 b) {
     return (vec3){ a.x - b.x, a.y - b.y, a.z - b.z };
+}
+
+/* Component-wise multiplication */
+vec3 vec3_mul(vec3 a, vec3 b) {
+    return (vec3){ a.x * b.x, a.y * b.y, a.z * b.z };
 }
 
 vec3 vec3_scale(float c, vec3 v) {
@@ -304,31 +312,44 @@ ray mat_lambertian(unsigned int* s, mat_l* mat, point3 p, vec3 norm, color* att)
     return (ray){ .loc = p, .dir = v };
 }
 
-color ray_color(unsigned int* s, mat_l* mats, ray* r, tri* tris, size_t ntris) {
-    float t = INFINITY;
-    int ti  = -1;
+/* Compute the ray's color.
+ * - `unsigned int* s`: Random state.
+ * - `mat_l* mats`: Lambertian material table.
+ * - `ray r`: Starting ray.
+ * - `tri* tris`: Triangle buffer.
+ * - `site_t ntris`: triangle buffer size. */
+color ray_color(unsigned int* s, mat_l* mats, ray r, tri* tris, size_t ntris) {
+    color c = { 1, 1, 1 }; 
 
-    for (size_t i = 0; i < ntris; i++) {
-        float ct = hit_triangle(&tris[i], r);
-        if (ct > 0 && ct < t) {
-            ti = i;
-            t  = ct;
+    for (int b = 0; b < MAX_RAY_BNCE; b++) {
+        float t = INFINITY;
+        int ti  = -1;
+
+        for (size_t i = 0; i < ntris; i++) {
+            float ct = hit_triangle(&tris[i], &r);
+            if (ct > 0 && ct < t) {
+                ti = i;
+                t  = ct;
+            }
         }
+
+        // No hit
+        if (ti == -1) break;
+
+        // Intersecting triangle
+        tri tr = tris[ti];
+
+        // Vector normal to the sphere at the point of intersection.
+        vec3   e1 = vec3_sub(tr.v[1], tr.v[0]);
+        vec3   e2 = vec3_sub(tr.v[2], tr.v[0]);
+        vec3 norm = vec3_unit(vec3_cross(e1, e2));
+
+        color att;
+        point3 p = ray_at(&r, t);
+        r = mat_lambertian(s, &mats[0], p, norm, &att);
+
+        c = vec3_mul(c, att);
     }
-
-    // No hit.
-    if (ti == -1) return (color){ 1, 1, 1 };
-
-    // Intersecting triangle
-    tri tr = tris[ti];
-
-    // Vector normal to the sphere at the point of intersection.
-    vec3 e1 = vec3_sub(tr.v[1], tr.v[0]);
-    vec3 e2 = vec3_sub(tr.v[2], tr.v[0]);
-    vec3 norm = vec3_unit(vec3_cross(e1, e2));
-
-    color c;
-    mat_lambertian(s, &mats[0], ray_at(r, t), norm, &c);
 
     return c;
 }
@@ -394,7 +415,7 @@ int main(int argc, char** argv) {
 
                 ray r = { cam_cen, ray_dir };
 
-                c = vec3_add(c, ray_color(&state, mats, &r, tris, ntris));
+                c = vec3_add(c, ray_color(&state, mats, r, tris, ntris));
             }
 
             c = vec3_scale(1.0 / PX_SAMPLES, c);
