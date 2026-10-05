@@ -67,11 +67,18 @@ vec3 vec3_cross(vec3 a, vec3 b) {
 
 typedef struct { vec3 loc, dir; } ray;
 
+/* The point for a ray at a given time.
+ * - `ray* r`: Ray.
+ * - `double t`: Time. */
+point3 ray_at(ray* r, double t) {
+    return vec3_add(r->loc, vec3_scale(t, r->dir));
+}
+
 /* Whether the ray intersects the sphere.
  * - `point3* cen`: Center of the sphere.
  * - `double rad`: Radius of the sphere.
  * - `ray* r`: Ray. */
-int hit_sphere(point3* cen, double rad, ray* r) {
+double hit_sphere(point3* cen, double rad, ray* r) {
     vec3 oc = vec3_sub(*cen, r->loc);
 
     double a = vec3_dot(r->dir, r->dir);
@@ -80,17 +87,25 @@ int hit_sphere(point3* cen, double rad, ray* r) {
 
     double discriminant = b * b - 4 * a * c;
 
-    return (discriminant >= 0);
+    if (discriminant < 0)
+        return -1;
+
+    return (-b - sqrt(discriminant)) / (2. * a);
 }
 
 color ray_color(ray* r) {
     point3 cen = { 0, 0, -1 };
     double rad = 0.5;
 
-    if (hit_sphere(&cen, rad, r))
-        return (color){ 1, 1, 1 };
+    double t = hit_sphere(&cen, rad, r);
 
-    return (color){ 0, 0, 0 };
+    // No sphere hit.
+    if (t <= 0) return (color){ 1, 1, 1 };
+
+    // Vector normal to the sphere at the point of intersection.
+    vec3 norm = vec3_unit(vec3_sub(ray_at(r, t), cen));
+
+    return vec3_scale(0.5, (color){ norm.x + 1, norm.y + 1, norm.z + 1 });
 }
 
 int main() {
