@@ -231,7 +231,7 @@ unsigned char* file_read(const char* path, size_t* len) {
 /* Compute Möller–Trumbore to find intersection.
  *
  * See: https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm */
-float hit_triangle(tri* tr, ray* r, float* u, float* v) {
+float hit_triangle(tri* tr, ray* r) {
     // These vectors are two edges of the triangle.
     vec3 e1 = vec3_sub(tr->v[1], tr->v[0]);
     vec3 e2 = vec3_sub(tr->v[2], tr->v[0]);
@@ -241,58 +241,48 @@ float hit_triangle(tri* tr, ray* r, float* u, float* v) {
     //   det[a, b, c] = dot(a, cross(b, c)).
     //
     // Proof: expand definitions, as usual.
-    vec3  p   = vec3_cross(r->dir, e2);
+    vec3    p = vec3_cross(r->dir, e2);
     float det = vec3_dot(e1, p);
 
     // The ray and the triangle are parallel
     if (fabsf(det) <= 1e-8f) return -1;
 
     float inv = 1 / det;
-    vec3  tv  = vec3_sub(r->loc, tr->v[0]);
+    vec3   tv = vec3_sub(r->loc, tr->v[0]);
 
     // Cramer's rule M x = b with
     //   M = [-D, e1, e2]
     //   x = (t, u, v)
     //   b = tv
-    *u = vec3_dot(tv, p) * inv;
-    if (*u < 0 || *u > 1) return -1;
+    float u = vec3_dot(tv, p) * inv;
+    if (u < 0 || u > 1) return -1;
 
-    vec3 q = vec3_cross(tv, e1);
-    *v = vec3_dot(r->dir, q) * inv;
-    if (*v < 0 || *u + *v > 1) return -1;
+    vec3  q = vec3_cross(tv, e1);
+    float v = vec3_dot(r->dir, q) * inv;
+    if (v < 0 || u + v > 1) return -1;
 
     float t = vec3_dot(e2, q) * inv;
 
     return t > 1e-4f ? t : -1;
 }
 
-/* Whether the ray intersects the sphere.
- * - `point3* cen`: Center of the sphere.
- * - `float rad`: Radius of the sphere.
- * - `ray* r`: Ray. */
-float hit_sphere(point3* cen, float rad, ray* r) {
-    vec3 oc = vec3_sub(*cen, r->loc);
+color ray_color(ray* r, tri* tris, size_t ntris) {
+    float t = INFINITY;
+    int ti  = -1;
 
-    float a = vec3_dot(r->dir, r->dir);
-    float b = -2 * vec3_dot(r->dir, oc);
-    float c = vec3_dot(oc, oc) - rad * rad;
-
-    float discriminant = b * b - 4 * a * c;
-
-    if (discriminant < 0)
-        return -1;
-
-    return (-b - sqrtf(discriminant)) / (2.f * a);
-}
-
-color ray_color(ray* r) {
-    tri tr = { .v = { {0, 0, -1}, {1, 0, -1}, {0, 1, -1} } };
-    float u, v;
-
-    float t = hit_triangle(&tr, r, &u, &v);
+    for (size_t i = 0; i < ntris; i++) {
+        float ct = hit_triangle(&tris[i], r);
+        if (ct > 0 && ct < t) {
+            ti = i;
+            t  = ct;
+        }
+    }
 
     // No hit.
-    if (t <= 0) return (color){ 1, 1, 1 };
+    if (ti == -1) return (color){ 1, 1, 1 };
+
+    // Intersecting triangle
+    tri tr = tris[ti];
 
     // Vector normal to the sphere at the point of intersection.
     vec3 e1 = vec3_sub(tr.v[1], tr.v[0]);
@@ -360,7 +350,7 @@ int main(int argc, char** argv) {
 
                 ray r = { cam_cen, ray_dir };
 
-                c = vec3_add(c, ray_color(&r));
+                c = vec3_add(c, ray_color(&r, tris, ntris));
             }
 
             c = vec3_scale(1.0 / PX_SAMPLES, c);
