@@ -334,7 +334,19 @@ color ray_color(unsigned int* s, mat_l* mats, ray r, tri* tris, size_t ntris) {
         }
 
         // No hit
-        if (ti == -1) break;
+        if (ti == -1) {
+            // The y component of the ray's current direction
+            // is used to compute the sky color
+            vec3 d = vec3_unit(r.dir);
+            float a = 0.5f * (d.y + 1);
+
+            color sky = vec3_add(
+                vec3_scale(1.f - a, (color){1,     1,   1}),
+                vec3_scale(a,       (color){.5f, .7f, 1.f})
+            );
+
+            return vec3_mul(c, sky);
+        }
 
         // Intersecting triangle
         tri tr = tris[ti];
