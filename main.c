@@ -81,6 +81,11 @@ vec3 vec3_cross(vec3 a, vec3 b) {
     };
 }
 
+/* Reflect a vector about a normal */
+vec3 vec3_reflect(vec3 v, vec3 n) {
+    return vec3_sub(v, vec3_scale(2.f, vec3_scale(vec3_dot(v, n), n)));
+}
+
 typedef struct { vec3 loc, dir; } ray;
 
 /* The point for a ray at a given time.
@@ -295,14 +300,17 @@ typedef struct { color albedo; } mat_l;
 /* Compute the reflected ray on a Lambertian material.
  * - `unsigned int* s`: Random state.
  * - `mat_l* mat`: Lambertian material reference.
- * - `point3 p`: Point of contact with surface.
- * - `vec3 norm`: Normal vector at contact point. 
+ * - `ray* r`: Incident ray.
+ * - `float t`: Time of contact.
+ * - `vec3 norm`: Normal vector of contacted surface. 
  * - `color* att`: Attenuation.
  *
  * When a ray hits a Lambertian, the reflected ray has some randomness to it.
  * This is what gives this material its fuzzy look. The attenuation is just the
  * albedo (the color of the material). */
-ray mat_lambertian(unsigned int* s, mat_l* mat, point3 p, vec3 norm, color* att) {
+ray mat_lambertian(unsigned int* s, mat_l* mat, ray* r, float t, vec3 norm, color* att) {
+    point3 p = ray_at(r, t);
+
     vec3 v = vec3_add(norm, rand_vec3_unit(s));
     if (vec3_len_sq(v) < 1e-8f) v = norm;
     else v = vec3_unit(v);
@@ -312,21 +320,48 @@ ray mat_lambertian(unsigned int* s, mat_l* mat, point3 p, vec3 norm, color* att)
     return (ray){ .loc = p, .dir = v };
 }
 
+/* Metal */
+typedef struct { color albedo; float fuzz; } mat_m;
+
+/* Compute the reflected ray on a Metal material.
+ * - `unsigned int* s`: Random state.
+ * - `mat_m* mat`: Metal material reference.
+ * - `ray* r`: Incident ray.
+ * - `float t`: Time of contact.
+ * - `vec3 norm`: Normal vector of contacted surface. 
+ * - `color* att`: Attenuation.
+ *
+ * When a ray hits a Metal, the ray is reflected with some scaled randomness.
+ * The scaling is what controls the amount of fuzz. Zero makes a perfectly shiny
+ * metal. The attenuation is just the albedo (the color of the material). */
+ray mat_metal(unsigned int* s, mat_m* mat, ray* r, float t, vec3 norm, color* att) {
+    point3  p = ray_at(r, t);
+    vec3 rand = rand_vec3_unit(s);
+
+    vec3 rr;
+    rr = vec3_reflect(r->dir, norm);
+    rr = vec3_add(vec3_unit(rr), vec3_scale(mat->fuzz, rand));
+
+    *att = mat->albedo;
+
+    return (ray){ .loc = p, .dir = rr };
+}
+
+typedef struct { tri* tris; size_t ntris; mat_l* ml; mat_m* mm; } scene;
+
 /* Compute the ray's color.
  * - `unsigned int* s`: Random state.
- * - `mat_l* mats`: Lambertian material table.
- * - `ray r`: Starting ray.
- * - `tri* tris`: Triangle buffer.
- * - `site_t ntris`: triangle buffer size. */
-color ray_color(unsigned int* s, mat_l* mats, ray r, tri* tris, size_t ntris) {
+ * - `scene* sc`: Scene information.
+ * - `ray r`: Starting ray. */
+color ray_color(unsigned int* s, scene* sc, ray r) {
     color c = { 1, 1, 1 }; 
 
     for (int b = 0; b < MAX_RAY_BNCE; b++) {
         float t = INFINITY;
         int ti  = -1;
 
-        for (size_t i = 0; i < ntris; i++) {
-            float ct = hit_triangle(&tris[i], &r);
+        for (size_t i = 0; i < sc->ntris; i++) {
+            float ct = hit_triangle(&(sc->tris)[i], &r);
             if (ct > 0 && ct < t) {
                 ti = i;
                 t  = ct;
@@ -349,7 +384,7 @@ color ray_color(unsigned int* s, mat_l* mats, ray r, tri* tris, size_t ntris) {
         }
 
         // Intersecting triangle
-        tri tr = tris[ti];
+        tri tr = (sc->tris)[ti];
 
         // Vector normal to the sphere at the point of intersection.
         vec3   e1 = vec3_sub(tr.v[1], tr.v[0]);
@@ -357,8 +392,8 @@ color ray_color(unsigned int* s, mat_l* mats, ray r, tri* tris, size_t ntris) {
         vec3 norm = vec3_unit(vec3_cross(e1, e2));
 
         color att;
-        point3 p = ray_at(&r, t);
-        r = mat_lambertian(s, &mats[0], p, norm, &att);
+        // r = mat_lambertian(s, &(sc->ml)[0], &r, t, norm, &att);
+        r = mat_metal(s, &(sc->mm)[0], &r, t, norm, &att);
 
         c = vec3_mul(c, att);
     }
@@ -382,8 +417,19 @@ int main(int argc, char** argv) {
     size_t ntris = 0;
     tri*    tris = stl_load(buf, fl, &ntris);
 
-    // Our lambertian material table
-    mat_l mats[] = { { .albedo = { 0.06f, 0.27f, 0.28f } } };
+    // Lambertian Materials
+    mat_l ml[] = { { .albedo = { 0.06f, 0.27f, 0.28f } } };
+
+    // Metal Materials
+    mat_m mm[] = { { .albedo = { 0.35f, 0.84f, 0.62f }, .fuzz = 0.98f } };
+
+    // Our scene information
+    scene sc = {
+        .tris  = tris,
+        .ntris = ntris,
+        .ml    = ml,    // Lambertian materials
+        .mm    = mm,    // Metal materials
+    };
 
     // RNG seed
     unsigned int state = INIT_STATE;
@@ -427,7 +473,7 @@ int main(int argc, char** argv) {
 
                 ray r = { cam_cen, ray_dir };
 
-                c = vec3_add(c, ray_color(&state, mats, r, tris, ntris));
+                c = vec3_add(c, ray_color(&state, &sc, r));
             }
 
             c = vec3_scale(1.0 / PX_SAMPLES, c);
