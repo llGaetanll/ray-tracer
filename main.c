@@ -13,6 +13,8 @@
 /* State to kickstart the prf */
 #define INIT_STATE   42
 
+#define PI 3.14159265358979323846f
+
 /* Print a correctly formatted ppm ASCII image.
  * - `unsigned char* fb`: The frame buffer, correctly sized.
  * - `int w`: Width of the image.
@@ -109,9 +111,22 @@ float rand_float(unsigned int* s) {
     return (float)man / (1 << 24);
 }
 
+float rand_float_range(unsigned int* s, float lo, float hi) {
+    return (hi - lo) * rand_float(s) + lo;
+}
+
 /* Random square in x: [-.5, .5] and y: [-.5, .5]. */
 vec3 rand_square(unsigned int* s) {
     return (vec3){ rand_float(s) - .5, rand_float(s) - .5, 0 };
+}
+
+/* Random unit vector, sampled analytically. */
+vec3 rand_vec3_unit(unsigned int* s) {
+    float theta = 2.f * PI * rand_float(s);
+    float z = rand_float_range(s, -1.f, 1.f);
+    float r = sqrtf(1 - z * z);
+
+    return (vec3){ r * cosf(theta), r * sinf(theta), z };
 }
 
 typedef struct { point3 v[3]; } tri;
@@ -266,7 +281,30 @@ float hit_triangle(tri* tr, ray* r) {
     return t > 1e-4f ? t : -1;
 }
 
-color ray_color(ray* r, tri* tris, size_t ntris) {
+/* Lambertian */
+typedef struct { color albedo; } mat_l;
+
+/* Compute the reflected ray on a Lambertian material.
+ * - `unsigned int* s`: Random state.
+ * - `mat_l* mat`: Lambertian material reference.
+ * - `point3 p`: Point of contact with surface.
+ * - `vec3 norm`: Normal vector at contact point. 
+ * - `color* att`: Attenuation.
+ *
+ * When a ray hits a Lambertian, the reflected ray has some randomness to it.
+ * This is what gives this material its fuzzy look. The attenuation is just the
+ * albedo (the color of the material). */
+ray mat_lambertian(unsigned int* s, mat_l* mat, point3 p, vec3 norm, color* att) {
+    vec3 v = vec3_add(norm, rand_vec3_unit(s));
+    if (vec3_len_sq(v) < 1e-8f) v = norm;
+    else v = vec3_unit(v);
+
+    *att = mat->albedo;
+
+    return (ray){ .loc = p, .dir = v };
+}
+
+color ray_color(unsigned int* s, mat_l* mats, ray* r, tri* tris, size_t ntris) {
     float t = INFINITY;
     int ti  = -1;
 
@@ -289,7 +327,10 @@ color ray_color(ray* r, tri* tris, size_t ntris) {
     vec3 e2 = vec3_sub(tr.v[2], tr.v[0]);
     vec3 norm = vec3_unit(vec3_cross(e1, e2));
 
-    return vec3_scale(0.5, (color){ norm.x + 1, norm.y + 1, norm.z + 1 });
+    color c;
+    mat_lambertian(s, &mats[0], ray_at(r, t), norm, &c);
+
+    return c;
 }
 
 int main(int argc, char** argv) {
@@ -307,6 +348,9 @@ int main(int argc, char** argv) {
 
     size_t ntris = 0;
     tri*    tris = stl_load(buf, fl, &ntris);
+
+    // Our lambertian material table
+    mat_l mats[] = { { .albedo = { 0.06f, 0.27f, 0.28f } } };
 
     // RNG seed
     unsigned int state = INIT_STATE;
@@ -350,7 +394,7 @@ int main(int argc, char** argv) {
 
                 ray r = { cam_cen, ray_dir };
 
-                c = vec3_add(c, ray_color(&r, tris, ntris));
+                c = vec3_add(c, ray_color(&state, mats, &r, tris, ntris));
             }
 
             c = vec3_scale(1.0 / PX_SAMPLES, c);
