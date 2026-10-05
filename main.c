@@ -114,6 +114,46 @@ vec3 rand_square(unsigned int* s) {
     return (vec3){ rand_float(s) - .5, rand_float(s) - .5, 0 };
 }
 
+typedef struct { point3 v[3]; } tri;
+
+/* Compute Möller–Trumbore to find intersection.
+ *
+ * See: https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm */
+float hit_triangle(tri* tr, ray* r, float* u, float* v) {
+    // These vectors are two edges of the triangle.
+    vec3 e1 = vec3_sub(tr->v[1], tr->v[0]);
+    vec3 e2 = vec3_sub(tr->v[2], tr->v[0]);
+
+    // NOTE: It's just a result of R3 that
+    //
+    //   det[a, b, c] = dot(a, cross(b, c)).
+    //
+    // Proof: expand definitions, as usual.
+    vec3  p   = vec3_cross(r->dir, e2);
+    float det = vec3_dot(e1, p);
+
+    // The ray and the triangle are parallel
+    if (fabsf(det) <= 1e-8f) return -1;
+
+    float inv = 1 / det;
+    vec3  tv  = vec3_sub(r->loc, tr->v[0]);
+
+    // Cramer's rule M x = b with
+    //   M = [-D, e1, e2]
+    //   x = (t, u, v)
+    //   b = tv
+    *u = vec3_dot(tv, p) * inv;
+    if (*u < 0 || *u > 1) return -1;
+
+    vec3 q = vec3_cross(tv, e1);
+    *v = vec3_dot(r->dir, q) * inv;
+    if (*v < 0 || *u + *v > 1) return -1;
+
+    float t = vec3_dot(e2, q) * inv;
+
+    return t > 1e-4f ? t : -1;
+}
+
 /* Whether the ray intersects the sphere.
  * - `point3* cen`: Center of the sphere.
  * - `float rad`: Radius of the sphere.
@@ -134,16 +174,18 @@ float hit_sphere(point3* cen, float rad, ray* r) {
 }
 
 color ray_color(ray* r) {
-    point3 cen = { 0, 0, -1 };
-    float rad = 0.5;
+    tri tr = { .v = { {0, 0, -1}, {1, 0, -1}, {0, 1, -1} } };
+    float u, v;
 
-    float t = hit_sphere(&cen, rad, r);
+    float t = hit_triangle(&tr, r, &u, &v);
 
-    // No sphere hit.
+    // No hit.
     if (t <= 0) return (color){ 1, 1, 1 };
 
     // Vector normal to the sphere at the point of intersection.
-    vec3 norm = vec3_unit(vec3_sub(ray_at(r, t), cen));
+    vec3 e1 = vec3_sub(tr.v[1], tr.v[0]);
+    vec3 e2 = vec3_sub(tr.v[2], tr.v[0]);
+    vec3 norm = vec3_unit(vec3_cross(e1, e2));
 
     return vec3_scale(0.5, (color){ norm.x + 1, norm.y + 1, norm.z + 1 });
 }
