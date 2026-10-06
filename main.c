@@ -10,13 +10,18 @@
 /* Number of ray samples per pixel */
 #define PX_SAMPLES   64
 
-/* Maximum number of bounces for a given ray */
+/* Bounds on bounces for a given ray */
 #define MAX_RAY_BNCE 20
+#define MIN_RAY_BNCE  4
 
 /* State to kickstart the prf */
 #define INIT_STATE   42
 
 #define PI 3.14159265358979323846f
+
+float clamp(float f, float lo, float hi) {
+    return fminf(fmaxf(f, lo), hi);
+}
 
 /* Print a correctly formatted ppm ASCII image.
  * - `unsigned char* fb`: The frame buffer, correctly sized.
@@ -413,6 +418,13 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         float t = INFINITY;
         int ti  = -1;
 
+        float p;
+        p = fmaxf(c.x, fmaxf(c.y, c.z));
+        p = fminf(p, 0.95f);
+
+        float u = rand_float(s);
+        if (b > MIN_RAY_BNCE && u > p) return (color){ 0, 0, 0 };
+
         for (size_t i = 0; i < sc->ntris; i++) {
             float ct = hit_triangle(&(sc->tris)[i], &r);
             if (ct > 0 && ct < t) {
@@ -456,6 +468,11 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         r = mat_dielectric(s, &(sc->md)[0], &h, &att);
 
         c = vec3_mul(c, att);
+
+        // Russian roulette terminates paths early with probability p, which
+        // darkens the image by a factor of `p`. This restores it
+        if (b > MIN_RAY_BNCE)
+            c = vec3_scale(1.f / p, c);
     }
 
     return c;
@@ -539,9 +556,9 @@ int main(int argc, char** argv) {
             
             int i = 3 * (y * WIDTH + x);
 
-            fb[i + 0] = (int)(c.x * 255);
-            fb[i + 1] = (int)(c.y * 255);
-            fb[i + 2] = (int)(c.z * 255);
+            fb[i + 0] = (int)(clamp(c.x, 0.f, 1.f) * 255);
+            fb[i + 1] = (int)(clamp(c.y, 0.f, 1.f) * 255);
+            fb[i + 2] = (int)(clamp(c.z, 0.f, 1.f) * 255);
         }
     }
 
