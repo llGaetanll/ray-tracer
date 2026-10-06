@@ -14,6 +14,9 @@
 #define MAX_RAY_BNCE 20
 #define MIN_RAY_BNCE  4
 
+/* Minimum number of triangles in a BVH node */
+#define BVH_MIN_TRI  16
+
 /* State to kickstart the prf */
 #define INIT_STATE   42
 
@@ -160,6 +163,15 @@ vec3 rand_vec3_unit(unsigned int* s) {
 }
 
 typedef struct { point3 v[3]; } tri;
+
+/* Compute the centroid of the triangle. */
+point3 tri_centroid(tri* tri) {
+    point3 p = { 0, 0, 0 };
+
+    for (int i = 0; i < 3; i++) p = vec3_add(p, tri->v[i]);
+
+    return vec3_scale(1.f / 3, p);
+}
 
 unsigned int read_uint(const unsigned char** buf) {
     // Note endianness.
@@ -405,7 +417,213 @@ ray mat_dielectric(unsigned int* s, mat_d* mat, hit* h, color* att) {
     return (ray){ .loc = p, .dir = rr };
 }
 
-typedef struct { tri* tris; size_t ntris; mat_l* ml; mat_m* mm; mat_d* md; } scene;
+typedef struct { float lo, hi; } range;
+
+/* Include a value in the range. */
+void rng_add(range* rng, float v) {
+    rng->lo = fminf(rng->lo, v);
+    rng->hi = fmaxf(rng->hi, v);
+}
+
+typedef struct { range x, y, z; } aabb;
+
+aabb aabb_new() {
+    return (aabb){
+        .x = (range){ .lo = INFINITY, .hi = -INFINITY },
+        .y = (range){ .lo = INFINITY, .hi = -INFINITY },
+        .z = (range){ .lo = INFINITY, .hi = -INFINITY },
+    };
+}
+
+range aabb_axis(aabb* bbox, size_t axis) {
+    if (axis == 0) return bbox->x;
+    if (axis == 1) return bbox->y;
+    return bbox->z;
+}
+
+/* Returns the widest axis of the aabb. x = 0, y = 1, z = 2. */
+size_t aabb_axis_widest(aabb* bbox) {
+    float dx = bbox->x.hi - bbox->x.lo;
+    float dy = bbox->y.hi - bbox->y.lo;
+    float dz = bbox->z.hi - bbox->z.lo;
+
+    size_t axis = 0;
+    if (dy > dx) axis = 1;
+    if (dz > dy && dz > dx) axis = 2;
+
+    return axis;
+}
+
+void aabb_add_point3(aabb* bbox, point3 p) {
+    rng_add(&(bbox->x), p.x);
+    rng_add(&(bbox->y), p.y);
+    rng_add(&(bbox->z), p.z);
+}
+
+aabb aabb_from_centroids(tri* tri, size_t ntris) {
+    aabb bbox = aabb_new();
+
+    for (size_t i = 0; i < ntris; i++) {
+        point3 c = tri_centroid(&tri[i]);
+        aabb_add_point3(&bbox, c);
+    }
+
+    return bbox;
+}
+
+aabb aabb_from_tris(tri* tri, size_t ntris) {
+    aabb bbox = aabb_new();
+
+    for (size_t i = 0; i < ntris; i++)
+        for (int j = 0; j < 3; j++)
+            aabb_add_point3(&bbox, tri[i].v[j]);
+
+    return bbox;
+}
+
+/* Whether a ray intersects the aabb in a given range. Uses the slab method. */
+int aabb_hit(aabb* bbox, ray* r, range t_rng) {
+    for (int axis = 0; axis < 3; axis++) {
+        range ax = aabb_axis(bbox, axis);
+
+        float l = (axis == 0) ? r->loc.x : (axis == 1) ? r->loc.y : r->loc.z;
+        float d = (axis == 0) ? r->dir.x : (axis == 1) ? r->dir.y : r->dir.z;
+
+        float adinv = 1.f / d;
+
+        float t0 = (ax.lo - l) * adinv;
+        float t1 = (ax.hi - l) * adinv;
+
+        if (t0 < t1) {
+            if (t0 > t_rng.lo) t_rng.lo = t0;
+            if (t1 < t_rng.hi) t_rng.hi = t1;
+        } else {
+            if (t1 > t_rng.lo) t_rng.lo = t1;
+            if (t0 < t_rng.hi) t_rng.hi = t0;
+        }
+
+        if (t_rng.hi <= t_rng.lo)
+            return 0;
+    }
+
+    return 1;
+}
+
+/* BVH Tree Node.
+ *
+ * - `aabb bbox`: Bounding box of all the triangles in the node.
+ * - `size_t index`: If this is a leaf node, this is the index in the triangle
+ *   buffer. Otherwise, the index to the right child node in the tree.
+ * - `size_t count`: 0 for non-leaf nodes. Otherwise, counts the number of
+ *   triangles belong to this node. */
+typedef struct { aabb bbox; size_t index; size_t count; } node;
+
+/* Partition the triangles from [lo..hi] based on a value v and an axis.
+ *
+ * We use this function to partition our triangles buffer for BVH. At each step,
+ * we partition the triangles by a plane of value `v` with axis 0, 1, or 2 (for
+ * x, y, and z respectively). */
+size_t partition_in_place(tri* tris, size_t lo, size_t hi, float v, size_t axis) {
+    if (lo == hi) return 0;
+
+    while (lo < hi) {
+        point3 cl = tri_centroid(&tris[lo]);
+        point3 ch = tri_centroid(&tris[hi]);
+
+        float vl = (axis == 0) ? cl.x : (axis == 1) ? cl.y : cl.z;
+        float vh = (axis == 0) ? ch.x : (axis == 1) ? ch.y : ch.z;
+
+        if (vl < v) {
+            lo++;
+            continue;
+        }
+
+        if (vh >= v) {
+            hi--;
+            continue;
+        }
+
+        tri  tmp = tris[lo];
+        tris[lo] = tris[hi];
+        tris[hi] = tmp;
+
+        lo++;
+        hi--;
+    }
+
+    point3 cl = tri_centroid(&tris[lo]);
+    float vl = (axis == 0) ? cl.x : (axis == 1) ? cl.y : cl.z;
+
+    return (vl < v) ? lo + 1 : lo;
+}
+
+size_t bvh_routine(tri* tris, size_t tlo, size_t thi, node* nodes, size_t* nnodes) {
+    aabb bbox_cen = aabb_from_centroids(tris + tlo, thi - tlo);
+    size_t axis   = aabb_axis_widest(&bbox_cen);
+
+    float vl = aabb_axis(&bbox_cen, axis).lo;
+    float vh = aabb_axis(&bbox_cen, axis).hi;
+    float  v = 0.5f * (vl + vh);
+
+    size_t lo = tlo;
+    size_t hi = thi - 1;
+
+    aabb bbox = aabb_from_tris(tris + tlo, thi - tlo);
+    int  leaf = thi - tlo < BVH_MIN_TRI;
+
+    size_t ni = *nnodes;
+    node n = (node){ .bbox = bbox, .index = leaf ? tlo : 0, .count = leaf ? thi - tlo : 0 };
+
+    nodes[ni] = n;
+    (*nnodes)++;
+
+    if (!leaf) {
+        size_t i = partition_in_place(tris, lo, hi, v, axis);
+
+        // It's rare but possible that we get a case where all the centroids
+        // are so close to each other that the partition is completely
+        // ineffective. If this is the case, this function recurses without
+        // bounds. To prevent this we check for this bound here and make sure we
+        // still divide the space. Note that we only need to check the lower
+        // bound because pip operates in [tlo, thi).
+        if (i == lo)
+            i = lo + (hi - lo) / 2;
+
+        bvh_routine(tris, tlo, i, nodes, nnodes);
+        nodes[ni].index = bvh_routine(tris, i, thi, nodes, nnodes);
+    }
+
+    return ni;
+}
+
+/* Compute Bounding Volume Hierarchies for the given triangle buffer.
+ * - `tri* tris`: Triangle buffer.
+ * - `size_t ntris`: Triangle buffer length
+ * - `size_t* nnodes`: BVH node buffer length. Set by this function.
+ * Returns node buffer. */
+node* bvh(tri* tris, size_t ntris, size_t* nnodes) {
+    *nnodes = 0;
+
+    node* nodes = malloc(2 * ntris * sizeof(node));
+    if (nodes == NULL) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+
+    bvh_routine(tris, 0, ntris, nodes, nnodes);
+
+    return nodes;
+}
+
+typedef struct {
+    tri*   tris;
+    size_t ntris;
+    node*  nodes;
+    size_t nnodes;
+    mat_l* ml;
+    mat_m* mm;
+    mat_d* md;
+} scene;
 
 /* Compute the ray's color.
  * - `unsigned int* s`: Random state.
@@ -415,8 +633,11 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
     color c = { 1, 1, 1 }; 
 
     for (int b = 0; b < MAX_RAY_BNCE; b++) {
-        float t = INFINITY;
-        int ti  = -1;
+        // TODO: I believe .lo is basically only used to satisfy aabb_hit
+        range t_rng = { .lo = 1e-4f, .hi = INFINITY };
+
+        // Triangle index - the triangle that we hit.
+        int ti = -1;
 
         float p;
         p = fmaxf(c.x, fmaxf(c.y, c.z));
@@ -425,11 +646,33 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         float u = rand_float(s);
         if (b > MIN_RAY_BNCE && u > p) return (color){ 0, 0, 0 };
 
-        for (size_t i = 0; i < sc->ntris; i++) {
-            float ct = hit_triangle(&(sc->tris)[i], &r);
-            if (ct > 0 && ct < t) {
-                ti = i;
-                t  = ct;
+        // Note that `nodes` always has a root. Also note
+        // that the stack size is bounded by log_2(ntris / 16).
+        size_t stack[64];
+        stack[0] = 0;
+        int   sp = 0; // Stack pointer
+
+        while (sp > -1) {
+            size_t i = stack[sp--];
+            node* n = &sc->nodes[i];
+
+            if (aabb_hit(&(n->bbox), &r, t_rng)) {
+                if (n->count > 0) {
+                    // Leaf: Check through all the triangles normally
+                    for (size_t j = 0; j < n->count; j++) {
+                        tri* tr  = &(sc->tris)[n->index + j];
+                        float ct = hit_triangle(tr, &r);
+
+                        if (ct > 0 && ct < t_rng.hi) {
+                            ti = n->index + j;
+                            t_rng.hi = ct;
+                        }
+                    }
+                } else {
+                    // Non-leaf: Add both children to the stack
+                    stack[++sp] = i + 1;     // Left child
+                    stack[++sp] = n->index; // Right child
+                }
             }
         }
 
@@ -437,7 +680,7 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         if (ti == -1) {
             // The y component of the ray's current direction
             // is used to compute the sky color
-            vec3 d = vec3_unit(r.dir);
+            vec3  d = vec3_unit(r.dir);
             float a = 0.5f * (d.y + 1);
 
             color sky = vec3_add(
@@ -460,7 +703,7 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         int front = vec3_dot(r.dir, norm) < 0;
         if (!front) norm = vec3_scale(-1.f, norm);
 
-        hit h = { .r = &r, .t = t, .norm = norm, .front = front };
+        hit h = { .r = &r, .t = t_rng.hi, .norm = norm, .front = front };
 
         color att;
         // r = mat_lambertian(s, &(sc->ml)[0], &h, &att);
@@ -494,17 +737,22 @@ int main(int argc, char** argv) {
     size_t ntris = 0;
     tri*    tris = stl_load(buf, fl, &ntris);
 
+    size_t nnodes = 0;
+    node*   nodes = bvh(tris, ntris, &nnodes);
+
     mat_l ml[] = { { .albedo = { 0.06f, 0.27f, 0.28f } } };
     mat_m mm[] = { { .albedo = { 0.35f, 0.84f, 0.62f }, .fuzz = 0.98f } };
     mat_d md[] = { { .ri = 1.516f } };
 
     // Our scene information
     scene sc = {
-        .tris  = tris,
-        .ntris = ntris,
-        .ml    = ml,    // Lambertian materials
-        .mm    = mm,    // Metal materials
-        .md    = md,    // Dielectric materials
+        .tris   = tris,
+        .ntris  = ntris,
+        .nodes  = nodes,
+        .nnodes = nnodes,
+        .ml     = ml,     // Lambertian materials
+        .mm     = mm,     // Metal materials
+        .md     = md,     // Dielectric materials
     };
 
     // RNG seed
@@ -565,6 +813,7 @@ int main(int argc, char** argv) {
     ppm_print(fb, WIDTH, HEIGHT);
 
     free(fb);
+    free(nodes);
     free(tris);
     free(buf);
 
