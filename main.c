@@ -8,10 +8,10 @@
 #define HEIGHT      720
 
 /* Number of ray samples per pixel */
-#define PX_SAMPLES    8
+#define PX_SAMPLES   64
 
 /* Maximum number of bounces for a given ray */
-#define MAX_RAY_BNCE  4
+#define MAX_RAY_BNCE 20
 
 /* State to kickstart the prf */
 #define INIT_STATE   42
@@ -84,6 +84,18 @@ vec3 vec3_cross(vec3 a, vec3 b) {
 /* Reflect a vector about a normal */
 vec3 vec3_reflect(vec3 v, vec3 n) {
     return vec3_sub(v, vec3_scale(2.f, vec3_scale(vec3_dot(v, n), n)));
+}
+
+/* Refract a vector about a normal.
+ * - `vec3 v`: Vector to refract.
+ * - `vec3 n`: Normal vector.
+ * - `float k`: eta over eta prime in Snell's law */
+vec3 vec3_refract(vec3 v, vec3 n, float k) {
+    float     cos_theta = fminf(vec3_dot(vec3_scale(-1.f, v), n), 1.f);
+    vec3     r_out_perp = vec3_scale(k, vec3_add(v, vec3_scale(cos_theta, n)));
+    vec3 r_out_parallel = vec3_scale(-sqrtf(fabsf(1.f - vec3_len_sq(r_out_perp))), n);
+
+    return vec3_add(r_out_perp, r_out_parallel);
 }
 
 typedef struct { vec3 loc, dir; } ray;
@@ -294,6 +306,9 @@ float hit_triangle(tri* tr, ray* r) {
     return t > 1e-4f ? t : -1;
 }
 
+/* Info store about the intersection. */
+typedef struct { ray* r; float t; vec3 norm; int front; } hit;
+
 /* Lambertian */
 typedef struct { color albedo; } mat_l;
 
@@ -308,11 +323,11 @@ typedef struct { color albedo; } mat_l;
  * When a ray hits a Lambertian, the reflected ray has some randomness to it.
  * This is what gives this material its fuzzy look. The attenuation is just the
  * albedo (the color of the material). */
-ray mat_lambertian(unsigned int* s, mat_l* mat, ray* r, float t, vec3 norm, color* att) {
-    point3 p = ray_at(r, t);
+ray mat_lambertian(unsigned int* s, mat_l* mat, hit* h, color* att) {
+    point3 p = ray_at(h->r, h->t);
 
-    vec3 v = vec3_add(norm, rand_vec3_unit(s));
-    if (vec3_len_sq(v) < 1e-8f) v = norm;
+    vec3 v = vec3_add(h->norm, rand_vec3_unit(s));
+    if (vec3_len_sq(v) < 1e-8f) v = h->norm;
     else v = vec3_unit(v);
 
     *att = mat->albedo;
@@ -334,12 +349,12 @@ typedef struct { color albedo; float fuzz; } mat_m;
  * When a ray hits a Metal, the ray is reflected with some scaled randomness.
  * The scaling is what controls the amount of fuzz. Zero makes a perfectly shiny
  * metal. The attenuation is just the albedo (the color of the material). */
-ray mat_metal(unsigned int* s, mat_m* mat, ray* r, float t, vec3 norm, color* att) {
-    point3  p = ray_at(r, t);
+ray mat_metal(unsigned int* s, mat_m* mat, hit* h, color* att) {
+    point3  p = ray_at(h->r, h->t);
     vec3 rand = rand_vec3_unit(s);
 
     vec3 rr;
-    rr = vec3_reflect(r->dir, norm);
+    rr = vec3_reflect(h->r->dir, h->norm);
     rr = vec3_add(vec3_unit(rr), vec3_scale(mat->fuzz, rand));
 
     *att = mat->albedo;
@@ -347,7 +362,45 @@ ray mat_metal(unsigned int* s, mat_m* mat, ray* r, float t, vec3 norm, color* at
     return (ray){ .loc = p, .dir = rr };
 }
 
-typedef struct { tri* tris; size_t ntris; mat_l* ml; mat_m* mm; } scene;
+/* Dielectric */
+typedef struct { float ri; } mat_d;
+
+float reflectance(float cosine, float ri) {
+    float r0 = (1.f - ri) / (1.f + ri);
+    r0 = r0 * r0;
+    return r0 + (1.f - r0) * powf(1.f - cosine, 5.f);
+}
+
+/* Compute the reflected ray on a Dielectric material.
+ * - `unsigned int* s`: Random state.
+ * - `mat_d* mat`: Dielectric material reference.
+ * - `ray* r`: Incident ray.
+ * - `float t`: Time of contact.
+ * - `vec3 norm`: Normal vector of contacted surface. 
+ * - `color* att`: Attenuation. */
+ray mat_dielectric(unsigned int* s, mat_d* mat, hit* h, color* att) {
+    point3 p = ray_at(h->r, h->t);
+
+    float ri = h->front ? 1.f / mat->ri : mat->ri;
+
+    vec3 udir = vec3_unit(h->r->dir);
+
+    float cos_theta = fminf(vec3_dot(vec3_scale(-1.f, udir), h->norm), 1.f);
+    float sin_theta = sqrtf(fmaxf(0.f, 1.f - cos_theta * cos_theta));
+
+    vec3 rr;
+    if (ri * sin_theta > 1.f || reflectance(cos_theta, ri) > rand_float(s))
+        rr = vec3_reflect(udir, h->norm);
+    else
+        rr = vec3_refract(udir, h->norm, ri);
+
+    // No atttenuation for dielectrics
+    *att = (color){ 1, 1, 1 };
+
+    return (ray){ .loc = p, .dir = rr };
+}
+
+typedef struct { tri* tris; size_t ntris; mat_l* ml; mat_m* mm; mat_d* md; } scene;
 
 /* Compute the ray's color.
  * - `unsigned int* s`: Random state.
@@ -391,9 +444,16 @@ color ray_color(unsigned int* s, scene* sc, ray r) {
         vec3   e2 = vec3_sub(tr.v[2], tr.v[0]);
         vec3 norm = vec3_unit(vec3_cross(e1, e2));
 
+        // Front or back face hit
+        int front = vec3_dot(r.dir, norm) < 0;
+        if (!front) norm = vec3_scale(-1.f, norm);
+
+        hit h = { .r = &r, .t = t, .norm = norm, .front = front };
+
         color att;
-        // r = mat_lambertian(s, &(sc->ml)[0], &r, t, norm, &att);
-        r = mat_metal(s, &(sc->mm)[0], &r, t, norm, &att);
+        // r = mat_lambertian(s, &(sc->ml)[0], &h, &att);
+        // r = mat_metal(s, &(sc->mm)[0], &h, &att);
+        r = mat_dielectric(s, &(sc->md)[0], &h, &att);
 
         c = vec3_mul(c, att);
     }
@@ -417,11 +477,9 @@ int main(int argc, char** argv) {
     size_t ntris = 0;
     tri*    tris = stl_load(buf, fl, &ntris);
 
-    // Lambertian Materials
     mat_l ml[] = { { .albedo = { 0.06f, 0.27f, 0.28f } } };
-
-    // Metal Materials
     mat_m mm[] = { { .albedo = { 0.35f, 0.84f, 0.62f }, .fuzz = 0.98f } };
+    mat_d md[] = { { .ri = 1.516f } };
 
     // Our scene information
     scene sc = {
@@ -429,6 +487,7 @@ int main(int argc, char** argv) {
         .ntris = ntris,
         .ml    = ml,    // Lambertian materials
         .mm    = mm,    // Metal materials
+        .md    = md,    // Dielectric materials
     };
 
     // RNG seed
