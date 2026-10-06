@@ -1,5 +1,7 @@
 *One year of learning in 10 minutes.*
 
+![Stanford Dragon](dragon.png)
+
 Rules:
 - No AI
 - One file
