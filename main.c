@@ -26,6 +26,12 @@ float clamp(float f, float lo, float hi) {
     return fminf(fmaxf(f, lo), hi);
 }
 
+/* Per-thread seed. Uses Knuth's multiplicative hashing constant. */
+unsigned int state_for(int t) {
+    unsigned int s = (unsigned int)t * 2654435761u + INIT_STATE;
+    return s ? s : 1u; // 0 is a fixed point of xorshift
+}
+
 /* Print a correctly formatted ppm ASCII image.
  * - `unsigned char* fb`: The frame buffer, correctly sized.
  * - `int w`: Width of the image.
@@ -755,9 +761,6 @@ int main(int argc, char** argv) {
         .md     = md,     // Dielectric materials
     };
 
-    // RNG seed
-    unsigned int state = INIT_STATE;
-
     // Our framebuffer. This is where the image is emitted to.
     unsigned char* fb = malloc(3 * WIDTH * HEIGHT);
 
@@ -781,7 +784,11 @@ int main(int argc, char** argv) {
     vec3 px00_loc = vec3_add(vp_ul, vec3_scale(0.5, vec3_add(px_du, px_dv)));
 
     // Fill the framebuffer pixel by pixel.
+    #pragma omp parallel for
     for (int y = 0; y < HEIGHT; y++) {
+        // RNG seed per thread
+        unsigned int state = state_for(y);
+
         for (int x = 0; x < WIDTH; x++) {
 
             color c = { 0, 0, 0 };
